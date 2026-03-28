@@ -9,8 +9,8 @@ SYMBOLS = ["BTCUSDT", "ETHUSDT", "IOTXUSDT"]
 API_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol={}"
 KLINES_URL = "https://api.binance.com/api/v3/klines?symbol={}&interval=1h&limit=150"
 
-TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN_REMOVED"
-TELEGRAM_CHAT_ID = "TELEGRAM_CHAT_ID_REMOVED"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
 # Tracks last alert time per symbol+signal to avoid repeats within 10 minutes
