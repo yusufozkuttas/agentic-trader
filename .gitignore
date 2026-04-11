@@ -1,3 +1,14 @@
+# Secrets
 .env
+
+# Runtime output
+logs/
+paper_trades.json
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+
+# macOS
+.DS_Store
