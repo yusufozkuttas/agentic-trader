@@ -464,9 +464,6 @@ def detect_liquidity_sweeps(
 
 
 # ---------------------------------------------------------------------------
-# Combined signal
-# Migrated from crypto_tracker.py :: combined_signal
-# ---------------------------------------------------------------------------
 # Trend filter — EMA100 / EMA300 alignment
 # ---------------------------------------------------------------------------
 
@@ -512,67 +509,126 @@ def trend_filter(ohlcv: list) -> str:
 def combined_signal(
     rsi: float | None,
     macd_hist: float | None,
+    macd_hist_prev: float | None = None,
     fvg_latest: dict | None = None,
-    sweeps_recent: list | None = None,
-    weak_buy_rsi: float = 45.0,
-    weak_sell_rsi: float = 55.0,
-    trend: str = "NEUTRAL",
-) -> str:
+    funding_rate: float | None = None,
+    ls_long_pct: float | None = None,
+    ls_short_pct: float | None = None,
+) -> dict:
     """
-    Derive a trading signal from RSI, MACD, FVG, sweep context, and trend.
+    Score-based signal engine.
 
-    Signal hierarchy (strongest → weakest)
-    ---------------------------------------
-    STRONG BUY  : RSI < 30             AND MACD bullish   [trend: always passes]
-    BUY         : RSI < 30             (MACD neutral)     [trend: BULLISH or NEUTRAL]
-    STRONG SELL : RSI > 70             AND MACD bearish   [trend: always passes]
-    SELL        : RSI > 70                                [trend: BEARISH or NEUTRAL]
-    WEAK BUY    : RSI < weak_buy_rsi   AND MACD bullish AND (FVG OR sweep)
-                  [trend: BULLISH only]
-    WEAK SELL   : RSI > weak_sell_rsi  AND MACD bearish AND (FVG OR sweep)
-                  [trend: BEARISH only]
-    HOLD        : everything else, or trend mismatch
-
-    Trend filter rules
-    ------------------
-    BULLISH  → block all SELL / WEAK SELL
-    BEARISH  → block all BUY  / WEAK BUY
-    NEUTRAL  → block WEAK BUY and WEAK SELL; allow STRONG tiers and RSI extremes
-    STRONG BUY / STRONG SELL always pass — RSI extremes override trend.
-
-    Parameters
+    BULL SCORE
     ----------
-    trend         : "BULLISH" | "BEARISH" | "NEUTRAL"  (from trend_filter())
-    weak_buy_rsi  : upper RSI bound for WEAK BUY  (default 45)
-    weak_sell_rsi : lower RSI bound for WEAK SELL (default 55)
+    RSI < 30                        → +3  (overrides the +2)
+    RSI < 35                        → +2
+    Bullish FVG present             → +2
+    MACD histogram rising           → +1  (hist > hist_prev)
+    Funding rate < -0.01%           → +1
+    Short side L/S > 55%            → +1
+
+    BEAR SCORE (mirror)
+    ----------
+    RSI > 70                        → +3
+    RSI > 65                        → +2
+    Bearish FVG present             → +2
+    MACD histogram falling          → +1
+    Funding rate > +0.01%           → +1
+    Long side L/S > 65%             → +1
+
+    DECISION
+    --------
+    ≥ 5  →  STRONG BUY / STRONG SELL
+    3–4  →  BUY / SELL
+    < 3  →  HOLD
+
+    Returns
+    -------
+    {
+        "signal":       str,
+        "bull_score":   int,
+        "bear_score":   int,
+        "bull_reasons": list[str],
+        "bear_reasons": list[str],
+    }
     """
+    _empty = {"signal": "HOLD", "bull_score": 0, "bear_score": 0,
+              "bull_reasons": [], "bear_reasons": []}
     if rsi is None:
-        return "HOLD"
+        return _empty
 
-    macd_bullish = macd_hist is not None and macd_hist > 0
-    macd_bearish = macd_hist is not None and macd_hist < 0
-    has_fvg      = fvg_latest is not None
-    has_sweep    = bool(sweeps_recent)
+    bull_score,  bear_score  = 0, 0
+    bull_reasons, bear_reasons = [], []
 
-    # --- Strong tiers: RSI extremes always pass, regardless of trend ---
-    if rsi < 30 and macd_bullish:
-        return "STRONG BUY"
-    if rsi > 70 and macd_bearish:
-        return "STRONG SELL"
-
-    # --- Standard BUY/SELL: blocked by opposing trend ---
+    # --- RSI ---
     if rsi < 30:
-        return "HOLD" if trend == "BEARISH" else "BUY"
+        bull_score += 3
+        bull_reasons.append("RSI<30")
+    elif rsi < 35:
+        bull_score += 2
+        bull_reasons.append("RSI<35")
+
     if rsi > 70:
-        return "HOLD" if trend == "BULLISH" else "SELL"
+        bear_score += 3
+        bear_reasons.append("RSI>70")
+    elif rsi > 65:
+        bear_score += 2
+        bear_reasons.append("RSI>65")
 
-    # --- Weak tiers: require trend alignment, blocked in NEUTRAL ---
-    if rsi < weak_buy_rsi and macd_bullish and (has_fvg or has_sweep):
-        return "WEAK BUY" if trend == "BULLISH" else "HOLD"
-    if rsi > weak_sell_rsi and macd_bearish and (has_fvg or has_sweep):
-        return "WEAK SELL" if trend == "BEARISH" else "HOLD"
+    # --- FVG direction ---
+    if fvg_latest is not None:
+        if fvg_latest["type"] == "Bullish":
+            bull_score += 2
+            bull_reasons.append("FVG↑")
+        else:
+            bear_score += 2
+            bear_reasons.append("FVG↓")
 
-    return "HOLD"
+    # --- MACD momentum (histogram direction vs previous bar) ---
+    if macd_hist is not None and macd_hist_prev is not None:
+        if macd_hist > macd_hist_prev:
+            bull_score += 1
+            bull_reasons.append("MACD↑")
+        elif macd_hist < macd_hist_prev:
+            bear_score += 1
+            bear_reasons.append("MACD↓")
+
+    # --- Funding rate ---
+    if funding_rate is not None:
+        if funding_rate < -0.01:
+            bull_score += 1
+            bull_reasons.append(f"Fund{funding_rate:+.3f}%")
+        elif funding_rate > 0.01:
+            bear_score += 1
+            bear_reasons.append(f"Fund{funding_rate:+.3f}%")
+
+    # --- L/S ratio ---
+    if ls_short_pct is not None and ls_short_pct > 55:
+        bull_score += 1
+        bull_reasons.append(f"Shorts{ls_short_pct:.0f}%")
+    if ls_long_pct is not None and ls_long_pct > 65:
+        bear_score += 1
+        bear_reasons.append(f"Longs{ls_long_pct:.0f}%")
+
+    # --- Decision ---
+    if bull_score >= 5:
+        signal = "STRONG BUY"
+    elif bull_score >= 3:
+        signal = "BUY"
+    elif bear_score >= 5:
+        signal = "STRONG SELL"
+    elif bear_score >= 3:
+        signal = "SELL"
+    else:
+        signal = "HOLD"
+
+    return {
+        "signal":       signal,
+        "bull_score":   bull_score,
+        "bear_score":   bear_score,
+        "bull_reasons": bull_reasons,
+        "bear_reasons": bear_reasons,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -582,8 +638,9 @@ def combined_signal(
 def run_all(
     ohlcv: list,
     fvg_mode: str = "wick",
-    weak_buy_rsi: float = 45.0,
-    weak_sell_rsi: float = 55.0,
+    funding_rate: float | None = None,
+    ls_long_pct: float | None = None,
+    ls_short_pct: float | None = None,
 ) -> dict:
     """
     Run every signal on the given OHLCV list and return a single result dict.
@@ -592,8 +649,9 @@ def run_all(
     ----------
     ohlcv         : list of dicts from binance_feed.fetch_ohlcv()
     fvg_mode      : "wick" | "body"
-    weak_buy_rsi  : RSI upper bound for WEAK BUY (default 45)
-    weak_sell_rsi : RSI lower bound for WEAK SELL (default 55)
+    funding_rate  : latest funding rate (from coinglass_feed)
+    ls_long_pct   : long side % from L/S ratio
+    ls_short_pct  : short side % from L/S ratio
 
     Returns
     -------
@@ -602,10 +660,15 @@ def run_all(
         "macd"           : float | None,
         "macd_signal"    : float | None,
         "macd_hist"      : float | None,
+        "macd_hist_prev" : float | None,
         "trend"          : "BULLISH" | "BEARISH" | "NEUTRAL",
         "ema100"         : float | None,
         "ema300"         : float | None,
         "signal"         : str,
+        "bull_score"     : int,
+        "bear_score"     : int,
+        "bull_reasons"   : list[str],
+        "bear_reasons"   : list[str],
         "fvg_latest"     : dict | None,
         "fvg_history"    : list[dict],
         "equal_hl"       : dict,
@@ -616,6 +679,9 @@ def run_all(
     closes = _closes(ohlcv)
     rsi    = calculate_rsi(closes)
     macd, macd_sig, macd_hist = calculate_macd(closes)
+
+    # Previous bar's MACD histogram (for momentum direction)
+    _, _, macd_hist_prev = calculate_macd(closes[:-1]) if len(closes) > 1 else (None, None, None)
 
     # Trend filter
     trend         = trend_filter(ohlcv)
@@ -629,27 +695,31 @@ def run_all(
     equal_hl    = detect_equal_highs_lows(ohlcv)
     sweeps      = detect_liquidity_sweeps(ohlcv)
 
-    signal = combined_signal(
-        rsi, macd_hist,
-        fvg_latest, sweeps[:5],
-        weak_buy_rsi, weak_sell_rsi,
-        trend,
+    scored = combined_signal(
+        rsi, macd_hist, macd_hist_prev,
+        fvg_latest,
+        funding_rate, ls_long_pct, ls_short_pct,
     )
 
     return {
-        "rsi":           rsi,
-        "macd":          macd,
-        "macd_signal":   macd_sig,
-        "macd_hist":     macd_hist,
-        "trend":         trend,
-        "ema100":        ema100,
-        "ema300":        ema300,
-        "signal":        signal,
-        "fvg_latest":    fvg_latest,
-        "fvg_history":   fvg_history,
-        "equal_hl":      equal_hl,
-        "sweeps":        sweeps,
-        "sweeps_recent": sweeps[:5],
+        "rsi":            rsi,
+        "macd":           macd,
+        "macd_signal":    macd_sig,
+        "macd_hist":      macd_hist,
+        "macd_hist_prev": macd_hist_prev,
+        "trend":          trend,
+        "ema100":         ema100,
+        "ema300":         ema300,
+        "signal":         scored["signal"],
+        "bull_score":     scored["bull_score"],
+        "bear_score":     scored["bear_score"],
+        "bull_reasons":   scored["bull_reasons"],
+        "bear_reasons":   scored["bear_reasons"],
+        "fvg_latest":     fvg_latest,
+        "fvg_history":    fvg_history,
+        "equal_hl":       equal_hl,
+        "sweeps":         sweeps,
+        "sweeps_recent":  sweeps[:5],
     }
 
 
@@ -681,7 +751,9 @@ if __name__ == "__main__":
         print("[2] MACD          : N/A")
 
     # 3. Combined signal
-    print(f"[3] Signal        : {combined_signal(rsi, hist)}")
+    scored = combined_signal(rsi, hist)
+    print(f"[3] Signal        : {scored['signal']}  "
+          f"(bull={scored['bull_score']} bear={scored['bear_score']})")
 
     # 4. FVG latest
     fvg = detect_fvg_latest(ohlcv)

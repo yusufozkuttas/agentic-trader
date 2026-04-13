@@ -328,34 +328,47 @@ def _process_symbol(
     }
 
     try:
-        # 1. Candles + signals
+        # 1. Candles
         ohlcv  = fetch_ohlcv(symbol, "1h", 200)
         ticker = fetch_ticker(symbol)
         entry  = float(ticker["lastPrice"])
-        sig    = run_all(ohlcv)
 
         # 1a. Check open paper trades against latest candles
         if PAPER_TRADE:
             _check_open_paper_trades(symbol, ohlcv)
 
-        status["signal"] = sig["signal"]
-        status["rsi"]    = sig["rsi"]
-        status["hist"]   = sig["macd_hist"]
-
-        # 2. Market context (non-fatal if it fails)
+        # 2. Market context — fetched first so scores include funding/L/S
         try:
             ctx = fetch_market_snapshot(symbol)
         except Exception as ctx_exc:
             print(f"  [ctx] {symbol} market snapshot failed: {ctx_exc}")
             ctx = {"summary": {}}
 
-        status["funding"] = ctx.get("summary", {}).get("latest_funding_rate")
-        status["ls"]      = (
-            ctx.get("summary", {}).get("latest_long_pct"),
-            ctx.get("summary", {}).get("latest_short_pct"),
+        summary      = ctx.get("summary", {})
+        funding_rate = summary.get("latest_funding_rate")
+        ls_long_pct  = summary.get("latest_long_pct")
+        ls_short_pct = summary.get("latest_short_pct")
+
+        status["funding"] = funding_rate
+        status["ls"]      = (ls_long_pct, ls_short_pct)
+
+        # 3. Signal agent — market context passed in for score-based logic
+        sig = run_all(
+            ohlcv,
+            funding_rate=funding_rate,
+            ls_long_pct=ls_long_pct,
+            ls_short_pct=ls_short_pct,
         )
 
-        # 3. Risk agent — only for strong signals
+        status["signal"]       = sig["signal"]
+        status["rsi"]          = sig["rsi"]
+        status["hist"]         = sig["macd_hist"]
+        status["bull_score"]   = sig["bull_score"]
+        status["bear_score"]   = sig["bear_score"]
+        status["bull_reasons"] = sig["bull_reasons"]
+        status["bear_reasons"] = sig["bear_reasons"]
+
+        # 4. Risk agent — only for strong signals
         if sig["signal"] in ACTIONABLE_SIGNALS:
             plan = from_signal_agent(
                 sig, entry,
@@ -415,16 +428,16 @@ def _print_cycle_header(cycle: int):
     print(f"  Cycle #{cycle:<4}  {now}  |  {len(SYMBOLS)} symbols  |  "
           f"interval={POLL_INTERVAL}s")
     print(f"{'='*70}")
-    print(f"  {'Symbol':<10} {'Signal':<13} {'RSI':>6}  {'MACD':>9}  "
+    print(f"  {'Symbol':<10} {'Signal':<13} {'RSI':>6}  {'Bull':>5} {'Bear':>5}  "
           f"{'Verdict':<12}  {'Funding':>9}  {'L/S':>8}")
-    print(f"  {'-'*66}")
+    print(f"  {'-'*70}")
 
 def _print_status(st: dict):
     sym     = st["symbol"]
     signal  = _fmt_signal(st.get("signal", "ERROR"))
     rsi     = f"{st.get('rsi', 0) or 0:>6.1f}"
-    hist    = st.get("hist") or 0
-    macd    = f"{hist:>+9.4f}" if isinstance(hist, float) else f"{'N/A':>9}"
+    bull    = st.get("bull_score", 0)
+    bear    = st.get("bear_score", 0)
     verdict = _fmt_verdict(st.get("verdict"))
     funding = st.get("funding")
     ls      = st.get("ls", (None, None))
@@ -433,8 +446,21 @@ def _print_status(st: dict):
 
     alert_tag = f"  {_GREEN}✓ ALERT SENT{_RESET}" if st.get("alerted") else ""
     err_tag   = f"  {_RED}ERR: {st.get('error','')[:40]}{_RESET}" if st.get("error") else ""
-    print(f"  {sym:<10} {signal:<13} {rsi}  {macd}  {verdict:<12}  "
-          f"{fund_s}  {ls_s:>8}{alert_tag}{err_tag}")
+
+    print(f"  {sym:<10} {signal:<13} {rsi}  "
+          f"{_GREEN}{bull:>2}pts{_RESET}  {_RED}{bear:>2}pts{_RESET}  "
+          f"{verdict:<12}  {fund_s}  {ls_s:>8}{alert_tag}{err_tag}")
+
+    # Reasons line — only print if there are active conditions
+    bull_r = st.get("bull_reasons", [])
+    bear_r = st.get("bear_reasons", [])
+    if bull_r or bear_r:
+        parts = []
+        if bull_r:
+            parts.append(f"{_GREEN}▲ {', '.join(bull_r)}{_RESET}")
+        if bear_r:
+            parts.append(f"{_RED}▼ {', '.join(bear_r)}{_RESET}")
+        print(f"  {'':<10}   └─ {' | '.join(parts)}")
 
 
 # ---------------------------------------------------------------------------
