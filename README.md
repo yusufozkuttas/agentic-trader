@@ -36,9 +36,8 @@ orchestrator.py          — main entry point & polling loop
 | MACD | Histogram direction for momentum confirmation |
 | Fair Value Gap (FVG) | Wick-based detection — fewer but higher-quality gaps |
 | Equal Highs / Equal Lows | Liquidity pool identification |
-| Liquidity Sweep | Recent sweep of a prior high/low |
-| Order Block | Last opposing candle before a strong move |
-| Trend Filter | EMA100 & EMA300 — blocks all counter-trend entries |
+| Liquidity Sweep | Recent wick above/below a prior swing — stop hunt signal |
+| Trend Filter | EMA100 & EMA300 alignment — counter-trend entries are blocked |
 
 A `STRONG BUY` or `STRONG SELL` fires only when multiple conditions align **in the direction of the trend**.
 
@@ -105,7 +104,7 @@ Stop basis: FVG lower edge
 ### 1. Clone & configure
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/yusufozkuttas/agentic-trader
 cd CLAUDE-Project
 cp .env.example .env
 # Edit .env with your credentials
@@ -134,7 +133,7 @@ python orchestrator.py
 
 **Background (persistent):**
 ```bash
-nohup python -u orchestrator.py > logs/bot.log 2>&1 &
+nohup python -u orchestrator.py >> logs/bot.log 2>&1 &
 ```
 
 **Follow logs:**
@@ -146,8 +145,8 @@ tail -f logs/bot.log
 
 ## Requirements
 
-- Python 3.8+
-- No third-party packages — standard library only
+- Python 3.10+
+- `requests` (`pip install requests`)
 
 ---
 
