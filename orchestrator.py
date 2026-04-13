@@ -402,65 +402,67 @@ _RED    = "\033[91m"
 _YELLOW = "\033[93m"
 _CYAN   = "\033[96m"
 _DIM    = "\033[2m"
+_BOLD   = "\033[1m"
 _RESET  = "\033[0m"
 
-def _fmt_signal(signal: str) -> str:
-    if "STRONG BUY" in signal:
-        return f"{_GREEN}{signal:<11}{_RESET}"
-    if "BUY" in signal:
-        return f"{_GREEN}{signal:<11}{_RESET}"
-    if "STRONG SELL" in signal:
-        return f"{_RED}{signal:<11}{_RESET}"
-    if "SELL" in signal:
-        return f"{_RED}{signal:<11}{_RESET}"
-    return f"{_DIM}{signal:<11}{_RESET}"
+_BAR_WIDTH = 8  # max score is 8 (3+2+1+1+1)
 
-def _fmt_verdict(verdict) -> str:
-    if verdict == "TAKE_TRADE":
-        return f"{_GREEN}TAKE_TRADE{_RESET}"
-    if verdict == "SKIP":
-        return f"{_DIM}SKIP{_RESET}"
-    return f"{_DIM}—{_RESET}"
+def _score_bar(score: int) -> str:
+    filled = min(score, _BAR_WIDTH)
+    return "▓" * filled + "░" * (_BAR_WIDTH - filled)
+
+def _fmt_signal(signal: str) -> str:
+    if "STRONG BUY"  in signal: return f"{_BOLD}{_GREEN}{signal}{_RESET}"
+    if "BUY"         in signal: return f"{_GREEN}{signal}{_RESET}"
+    if "STRONG SELL" in signal: return f"{_BOLD}{_RED}{signal}{_RESET}"
+    if "SELL"        in signal: return f"{_RED}{signal}{_RESET}"
+    return f"{_DIM}{signal}{_RESET}"
 
 def _print_cycle_header(cycle: int):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n{'='*70}")
-    print(f"  Cycle #{cycle:<4}  {now}  |  {len(SYMBOLS)} symbols  |  "
-          f"interval={POLL_INTERVAL}s")
-    print(f"{'='*70}")
-    print(f"  {'Symbol':<10} {'Signal':<13} {'RSI':>6}  {'Bull':>5} {'Bear':>5}  "
-          f"{'Verdict':<12}  {'Funding':>9}  {'L/S':>8}")
-    print(f"  {'-'*70}")
+    now = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
+    line = f"  Cycle #{cycle}  ·  {now}  ·  {POLL_INTERVAL}s interval"
+    print(f"\n{_CYAN}{'═'*62}")
+    print(line)
+    print(f"{'═'*62}{_RESET}")
 
 def _print_status(st: dict):
     sym     = st["symbol"]
-    signal  = _fmt_signal(st.get("signal", "ERROR"))
-    rsi     = f"{st.get('rsi', 0) or 0:>6.1f}"
+    signal  = st.get("signal", "ERROR")
+    rsi     = st.get("rsi") or 0
     bull    = st.get("bull_score", 0)
     bear    = st.get("bear_score", 0)
-    verdict = _fmt_verdict(st.get("verdict"))
+    verdict = st.get("verdict")
     funding = st.get("funding")
     ls      = st.get("ls", (None, None))
-    fund_s  = f"{funding:>+9.3f}%" if funding is not None else f"{'N/A':>9}"
-    ls_s    = (f"{ls[0]:.0f}/{ls[1]:.0f}" if ls[0] is not None else "N/A")
+    bull_r  = st.get("bull_reasons", [])
+    bear_r  = st.get("bear_reasons", [])
+    error   = st.get("error")
 
-    alert_tag = f"  {_GREEN}✓ ALERT SENT{_RESET}" if st.get("alerted") else ""
-    err_tag   = f"  {_RED}ERR: {st.get('error','')[:40]}{_RESET}" if st.get("error") else ""
+    fund_s = f"{funding:+.3f}%" if funding is not None else "N/A"
+    ls_s   = f"{ls[0]:.0f}/{ls[1]:.0f}" if ls[0] is not None else "N/A"
 
-    print(f"  {sym:<10} {signal:<13} {rsi}  "
-          f"{_GREEN}{bull:>2}pts{_RESET}  {_RED}{bear:>2}pts{_RESET}  "
-          f"{verdict:<12}  {fund_s}  {ls_s:>8}{alert_tag}{err_tag}")
+    # Progress hint toward next tier
+    hint = ""
+    if signal == "BUY":
+        hint = f"  {_DIM}({5 - bull} more → STRONG BUY){_RESET}"
+    elif signal == "SELL":
+        hint = f"  {_DIM}({5 - bear} more → STRONG SELL){_RESET}"
+    elif verdict == "TAKE_TRADE":
+        hint = f"  {_GREEN}✓ TAKE TRADE{_RESET}"
+    if st.get("alerted"):
+        hint += f"  {_GREEN}✓ ALERT SENT{_RESET}"
 
-    # Reasons line — only print if there are active conditions
-    bull_r = st.get("bull_reasons", [])
-    bear_r = st.get("bear_reasons", [])
-    if bull_r or bear_r:
-        parts = []
-        if bull_r:
-            parts.append(f"{_GREEN}▲ {', '.join(bull_r)}{_RESET}")
-        if bear_r:
-            parts.append(f"{_RED}▼ {', '.join(bear_r)}{_RESET}")
-        print(f"  {'':<10}   └─ {' | '.join(parts)}")
+    print(f"\n  {_BOLD}{sym}{_RESET}  ·  {_fmt_signal(signal)}{hint}")
+
+    if error:
+        print(f"  {_RED}  ✗ {error[:65]}{_RESET}")
+        return
+
+    print(f"  ├ RSI {rsi:>5.1f}   Fund {fund_s:>8}   L/S {ls_s}")
+    print(f"  ├ Bull {bull}pt  [{_GREEN}{_score_bar(bull)}{_RESET}]"
+          + (f"  {_GREEN}{' · '.join(bull_r)}{_RESET}" if bull_r else ""))
+    print(f"  └ Bear {bear}pt  [{_RED}{_score_bar(bear)}{_RESET}]"
+          + (f"  {_RED}{' · '.join(bear_r)}{_RESET}" if bear_r else ""))
 
 
 # ---------------------------------------------------------------------------
@@ -535,22 +537,16 @@ def main():
                       "verdict": None, "alerted": False, "error": str(exc)}
             _print_status(st)
 
-        # Cooldown status footer
+        # Footer
         now = time.time()
-        cooling = [
-            s for s in SYMBOLS
-            if now - _last_alert.get(s, 0) < ALERT_COOLDOWN
-        ]
+        cooling = [s for s in SYMBOLS if now - _last_alert.get(s, 0) < ALERT_COOLDOWN]
         if cooling:
-            remaining = {
-                s: int(ALERT_COOLDOWN - (now - _last_alert[s]))
-                for s in cooling
-            }
-            parts = "  |  ".join(f"{s} {r}s" for s, r in remaining.items())
-            print(f"\n  {_DIM}Cooldown active: {parts}{_RESET}")
+            remaining = {s: int(ALERT_COOLDOWN - (now - _last_alert[s])) for s in cooling}
+            parts = "  ·  ".join(f"{s} {r}s" for s, r in remaining.items())
+            print(f"\n  {_DIM}cooldown: {parts}{_RESET}")
 
-        print(f"\n  Next cycle in {POLL_INTERVAL}s  "
-              f"({datetime.fromtimestamp(now + POLL_INTERVAL).strftime('%H:%M:%S')})")
+        next_time = datetime.fromtimestamp(now + POLL_INTERVAL).strftime("%H:%M:%S")
+        print(f"\n{_DIM}  ── next cycle at {next_time} ──{_RESET}")
 
         time.sleep(POLL_INTERVAL)
 
