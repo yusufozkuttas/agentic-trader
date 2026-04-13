@@ -2,7 +2,7 @@
 
 ## Architecture
 - orchestrator.py — main entry point (python orchestrator.py)
-- data/binance_feed.py — OHLCV + liquidation websocket
+- data/binance_feed.py — OHLCV candles + live ticker (Binance REST)
 - data/coinglass_feed.py — Funding Rate, OI, L/S Ratio (Binance Futures endpoints, no API key needed)
 - agents/signal_agent.py — score-based signal engine (see Signal Logic below)
 - agents/risk_agent.py — position sizing, SL, TP1/TP2, R:R verdict
@@ -37,8 +37,9 @@
 - Timeframe: 1h candles
 - Risk: 1% per trade on $1,000 simulated balance
 - Poll interval: 300s
-- Bot running via: nohup python -u orchestrator.py >> logs/bot.log 2>&1 &
-- Paper trades collected: 0 (SOL bear 4/5, ETH bull 3/5 — first trades imminent)
+- PAPER_TRADE=true (default, set in .env or orchestrator.py)
+- Bot running via: nohup python -u orchestrator.py >> logs/bot.log 2>&1 &  (>> appends, never overwrites)
+- Paper trades collected: 0
 
 ## Terminal Display Format
 One line per symbol, compact:
