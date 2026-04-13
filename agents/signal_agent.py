@@ -514,6 +514,11 @@ def combined_signal(
     funding_rate: float | None = None,
     ls_long_pct: float | None = None,
     ls_short_pct: float | None = None,
+    trend: str = "NEUTRAL",
+    recent_bull_sweep: bool = False,
+    recent_bear_sweep: bool = False,
+    eq_low_swept: bool = False,
+    eq_high_swept: bool = False,
 ) -> dict:
     """
     Score-based signal engine.
@@ -526,6 +531,9 @@ def combined_signal(
     MACD histogram rising           → +1  (hist > hist_prev)
     Funding rate < -0.01%           → +1
     Short side L/S > 55%            → +1
+    Trend == BULLISH                → +1
+    Recent bullish sweep (last 3c)  → +2
+    Equal lows swept                → +1
 
     BEAR SCORE (mirror)
     ----------
@@ -535,6 +543,9 @@ def combined_signal(
     MACD histogram falling          → +1
     Funding rate > +0.01%           → +1
     Long side L/S > 65%             → +1
+    Trend == BEARISH                → +1
+    Recent bearish sweep (last 3c)  → +2
+    Equal highs swept               → +1
 
     DECISION
     --------
@@ -610,14 +621,39 @@ def combined_signal(
         bear_score += 1
         bear_reasons.append(f"Longs{ls_long_pct:.0f}%")
 
+    # --- Trend filter (EMA100/EMA300 alignment) ---
+    if trend == "BULLISH":
+        bull_score += 1
+        bull_reasons.append("Trend↑")
+    elif trend == "BEARISH":
+        bear_score += 1
+        bear_reasons.append("Trend↓")
+
+    # --- Liquidity sweeps (last 3 candles) ---
+    if recent_bull_sweep:
+        bull_score += 2
+        bull_reasons.append("Sweep↑")
+    if recent_bear_sweep:
+        bear_score += 2
+        bear_reasons.append("Sweep↓")
+
+    # --- Equal highs/lows swept ---
+    if eq_low_swept:
+        bull_score += 1
+        bull_reasons.append("EqLow swept")
+    if eq_high_swept:
+        bear_score += 1
+        bear_reasons.append("EqHigh swept")
+
     # --- Decision ---
-    if bull_score >= 5:
+    # Dominant side wins: compare scores before assigning signal
+    if bull_score >= 5 and bull_score >= bear_score:
         signal = "STRONG BUY"
-    elif bull_score >= 3:
-        signal = "BUY"
-    elif bear_score >= 5:
+    elif bear_score >= 5 and bear_score > bull_score:
         signal = "STRONG SELL"
-    elif bear_score >= 3:
+    elif bull_score >= 3 and bull_score > bear_score:
+        signal = "BUY"
+    elif bear_score >= 3 and bear_score > bull_score:
         signal = "SELL"
     else:
         signal = "HOLD"
@@ -695,10 +731,36 @@ def run_all(
     equal_hl    = detect_equal_highs_lows(ohlcv)
     sweeps      = detect_liquidity_sweeps(ohlcv)
 
+    # Liquidity sweep flags — "last 3 candles" means index >= 96 within the
+    # 100-candle lookback window used by detect_liquidity_sweeps (max index=98).
+    _RECENT_IDX = 96
+    _EQ_TOL     = 0.005  # 0.5% price tolerance for sweep vs. equal level match
+    recent_bull_sweeps = [s for s in sweeps if s["type"] == "Bullish Sweep" and s["index"] >= _RECENT_IDX]
+    recent_bear_sweeps = [s for s in sweeps if s["type"] == "Bearish Sweep" and s["index"] >= _RECENT_IDX]
+
+    eq_lows  = equal_hl.get("equal_lows",  [])
+    eq_highs = equal_hl.get("equal_highs", [])
+
+    eq_low_swept = bool(eq_lows) and any(
+        abs(sw["sweep_price"] - lvl["price"]) / lvl["price"] <= _EQ_TOL
+        for sw in recent_bull_sweeps
+        for lvl in eq_lows
+    )
+    eq_high_swept = bool(eq_highs) and any(
+        abs(sw["sweep_price"] - lvl["price"]) / lvl["price"] <= _EQ_TOL
+        for sw in recent_bear_sweeps
+        for lvl in eq_highs
+    )
+
     scored = combined_signal(
         rsi, macd_hist, macd_hist_prev,
         fvg_latest,
         funding_rate, ls_long_pct, ls_short_pct,
+        trend=trend,
+        recent_bull_sweep=bool(recent_bull_sweeps),
+        recent_bear_sweep=bool(recent_bear_sweeps),
+        eq_low_swept=eq_low_swept,
+        eq_high_swept=eq_high_swept,
     )
 
     return {

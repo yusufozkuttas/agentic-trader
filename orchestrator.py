@@ -45,9 +45,9 @@ Config (.env)
 import json
 import os
 import time
-import urllib.parse
-import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
+
+import requests
 
 # ---------------------------------------------------------------------------
 # .env loader (stdlib — no external dependencies)
@@ -77,8 +77,8 @@ _load_dotenv()
 _raw_symbols = os.environ.get("SYMBOLS", "BTCUSDT,ETHUSDT,IOTXUSDT")
 SYMBOLS = [s.strip().upper() for s in _raw_symbols.split(",") if s.strip()]
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",   "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",   "").strip()
 TELEGRAM_URL       = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
 ACCOUNT_BALANCE  = float(os.environ.get("ACCOUNT_BALANCE",  "1000"))
@@ -89,6 +89,7 @@ BACKTEST_SYMBOL  = os.environ.get("BACKTEST_SYMBOL", SYMBOLS[0])
 
 PAPER_TRADE           = os.environ.get("PAPER_TRADE", "true").lower() in ("1", "true", "yes")
 PAPER_TRADES_FILE     = "paper_trades.json"
+COOLDOWN_STATE_FILE   = "cooldown_state.json"
 RUN_STARTUP_BACKTEST  = False  # 500-candle startup backtest is too few to be useful
 
 # Signals that trigger a risk calculation
@@ -99,6 +100,24 @@ ACTIONABLE_SIGNALS = {"STRONG BUY", "STRONG SELL"}
 # ---------------------------------------------------------------------------
 
 _last_alert: dict[str, float] = {}   # symbol → last alert unix timestamp
+
+
+def _load_cooldown_state():
+    """Load persisted cooldown timestamps from disk into _last_alert."""
+    if not os.path.isfile(COOLDOWN_STATE_FILE):
+        return
+    try:
+        with open(COOLDOWN_STATE_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        _last_alert.update({k: float(v) for k, v in data.items()})
+    except Exception:
+        pass  # corrupt file — start fresh, non-fatal
+
+
+def _save_cooldown_state():
+    """Persist current _last_alert timestamps to disk."""
+    with open(COOLDOWN_STATE_FILE, "w", encoding="utf-8") as fh:
+        json.dump(_last_alert, fh)
 
 
 # ---------------------------------------------------------------------------
@@ -120,20 +139,20 @@ def _import_agents():
 
 def _send_telegram(message: str) -> bool:
     """
-    Send a plain-text message to TELEGRAM_CHAT_ID.
+    Send a plain-text message to TELEGRAM_CHAT_ID via JSON POST.
     Returns True on success, False on failure (non-fatal).
     """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("  [Telegram] Credentials not set — skipping alert.")
         return False
-    data = urllib.parse.urlencode({
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text":    message,
-    }).encode()
-    req = urllib.request.Request(TELEGRAM_URL, data=data, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=10):
-            return True
+        resp = requests.post(
+            TELEGRAM_URL,
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
     except Exception as exc:
         print(f"  [Telegram] Send failed: {exc}")
         return False
@@ -146,6 +165,7 @@ def _can_alert(symbol: str) -> bool:
 
 def _mark_alerted(symbol: str):
     _last_alert[symbol] = time.time()
+    _save_cooldown_state()
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +191,7 @@ def _log_paper_trade(symbol: str, plan: dict):
     trades = _load_paper_trades()
     trades.append({
         "id":            f"{symbol}_{int(time.time())}",
-        "timestamp":     datetime.utcnow().isoformat(),
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
         "symbol":        symbol,
         "direction":     plan["direction"],
         "entry":         plan["entry"],
@@ -203,7 +223,7 @@ def _check_open_paper_trades(symbol: str, ohlcv: list):
 
     updated = False
     for trade in open_trades:
-        opened_dt = datetime.fromisoformat(trade["timestamp"])
+        opened_dt = datetime.fromisoformat(trade["timestamp"]).replace(tzinfo=None)
         direction = trade["direction"]
         tp1 = trade["tp1"]
         sl  = trade["stop_loss"]
@@ -332,6 +352,7 @@ def _process_symbol(
         ohlcv  = fetch_ohlcv(symbol, "1h", 200)
         ticker = fetch_ticker(symbol)
         entry  = float(ticker["lastPrice"])
+        status["current_price"] = entry
 
         # 1a. Check open paper trades against latest candles
         if PAPER_TRADE:
@@ -367,6 +388,7 @@ def _process_symbol(
         status["bear_score"]   = sig["bear_score"]
         status["bull_reasons"] = sig["bull_reasons"]
         status["bear_reasons"] = sig["bear_reasons"]
+        status["trend"]        = sig.get("trend", "NEUTRAL")
 
         # 4. Risk agent — only for strong signals
         if sig["signal"] in ACTIONABLE_SIGNALS:
@@ -378,7 +400,11 @@ def _process_symbol(
             status["verdict"] = plan["verdict"]
 
             # 4. Paper log + Telegram alert
-            if plan["verdict"] == "TAKE_TRADE" and _can_alert(symbol):
+            already_open = PAPER_TRADE and any(
+                t["symbol"] == symbol and t.get("outcome") is None
+                for t in _load_paper_trades()
+            )
+            if plan["verdict"] == "TAKE_TRADE" and _can_alert(symbol) and not already_open:
                 if PAPER_TRADE:
                     _log_paper_trade(symbol, plan)
                 _mark_alerted(symbol)   # always set cooldown — prevents duplicate logs if Telegram is down
@@ -405,61 +431,88 @@ _DIM    = "\033[2m"
 _BOLD   = "\033[1m"
 _RESET  = "\033[0m"
 
-_BAR_WIDTH = 8  # max score is 8 (3+2+1+1+1)
+_BAR_WIDTH = 10  # visual width; max score is 12
 
 def _score_bar(score: int) -> str:
     filled = min(score, _BAR_WIDTH)
     return "▓" * filled + "░" * (_BAR_WIDTH - filled)
 
-def _fmt_signal(signal: str) -> str:
-    if "STRONG BUY"  in signal: return f"{_BOLD}{_GREEN}{signal}{_RESET}"
-    if "BUY"         in signal: return f"{_GREEN}{signal}{_RESET}"
-    if "STRONG SELL" in signal: return f"{_BOLD}{_RED}{signal}{_RESET}"
-    if "SELL"        in signal: return f"{_RED}{signal}{_RESET}"
-    return f"{_DIM}{signal}{_RESET}"
-
 def _print_cycle_header(cycle: int):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{_CYAN}Cycle #{cycle}  ·  {now}  ·  {POLL_INTERVAL}s interval{_RESET}")
+    print(f"{_DIM}{'━' * 60}{_RESET}")
+
+def _open_trade_pnl_lines(symbol: str, current_price: float) -> list:
+    """Return formatted P&L lines for any open paper trades on this symbol."""
+    lines = []
+    for t in _load_paper_trades():
+        if t["symbol"] != symbol or t.get("outcome") is not None:
+            continue
+        direction = t["direction"]
+        entry     = t["entry"]
+        sl        = t["stop_loss"]
+        tp1       = t["tp1"]
+        pnl_pct   = ((current_price - entry) / entry * 100
+                     if direction == "LONG"
+                     else (entry - current_price) / entry * 100)
+        color = _GREEN if pnl_pct >= 0 else _RED
+        sign  = "+" if pnl_pct >= 0 else ""
+        lines.append(
+            f"  {color}📋 {direction} ${entry:,.0f} → now ${current_price:,.0f}"
+            f"  |  {sign}{pnl_pct:.2f}%"
+            f"  |  SL:${sl:,.0f}  |  TP1:${tp1:,.0f}{_RESET}"
+        )
+    return lines
 
 def _print_status(st: dict):
-    sym    = st["symbol"][:3]          # BTC / ETH / SOL
-    signal = st.get("signal", "ERROR")
-    rsi    = st.get("rsi") or 0
-    bull   = st.get("bull_score", 0)
-    bear   = st.get("bear_score", 0)
-    verdict = st.get("verdict")
-    bull_r = st.get("bull_reasons", [])
-    bear_r = st.get("bear_reasons", [])
-    error  = st.get("error")
+    sym           = st["symbol"][:3]          # BTC / ETH / SOL
+    signal        = st.get("signal", "ERROR")
+    rsi           = st.get("rsi") or 0
+    bull          = st.get("bull_score", 0)
+    bear          = st.get("bear_score", 0)
+    trend         = st.get("trend", "NEUTRAL")
+    bull_r        = st.get("bull_reasons", [])
+    bear_r        = st.get("bear_reasons", [])
+    funding       = st.get("funding")
+    ls_long, ls_short = st.get("ls") or (None, None)
+    current_price = st.get("current_price")
+    error         = st.get("error")
 
     if error:
-        print(f"  {sym:<3}  {_RED}ERROR  {error[:55]}{_RESET}")
+        print(f"\n  {_BOLD}{sym}{_RESET}  {_RED}ERROR  {error[:55]}{_RESET}")
         return
 
-    # Signal color
-    if "STRONG BUY"  in signal: sig_fmt = f"{_BOLD}{_GREEN}{signal:<11}{_RESET}"
-    elif "BUY"       in signal: sig_fmt = f"{_GREEN}{signal:<11}{_RESET}"
-    elif "STRONG SELL" in signal: sig_fmt = f"{_BOLD}{_RED}{signal:<11}{_RESET}"
-    elif "SELL"      in signal: sig_fmt = f"{_RED}{signal:<11}{_RESET}"
-    else:                        sig_fmt = f"{_DIM}{signal:<11}{_RESET}"
+    # Line 1: symbol  signal  trend arrow
+    if "STRONG BUY"   in signal: sig_fmt = f"{_BOLD}{_GREEN}{signal}{_RESET}"
+    elif "BUY"        in signal: sig_fmt = f"{_GREEN}{signal}{_RESET}"
+    elif "STRONG SELL" in signal: sig_fmt = f"{_BOLD}{_RED}{signal}{_RESET}"
+    elif "SELL"       in signal: sig_fmt = f"{_RED}{signal}{_RESET}"
+    else:                         sig_fmt = f"{_DIM}{signal}{_RESET}"
 
-    # Reasons: bull first, then bear
-    reasons = bull_r + bear_r
-    reasons_s = f"[{' '.join(reasons)}]" if reasons else ""
+    if trend == "BULLISH":   trend_arrow = f"{_GREEN}▲ BULLISH{_RESET}"
+    elif trend == "BEARISH": trend_arrow = f"{_RED}▼ BEARISH{_RESET}"
+    else:                    trend_arrow = f"{_DIM}─ NEUTRAL{_RESET}"
 
-    # Suffix tags
-    suffix = ""
-    if verdict == "TAKE_TRADE" or st.get("alerted"):
-        suffix = f"  {_GREEN}✓ TRADE{_RESET}"
-    elif signal == "BUY":
-        suffix = f"  {_DIM}+{5 - bull} to STRONG{_RESET}"
-    elif signal == "SELL":
-        suffix = f"  {_DIM}+{5 - bear} to STRONG{_RESET}"
+    print(f"\n  {_BOLD}{sym}{_RESET}  {sig_fmt}  {trend_arrow}")
 
-    print(f"  {sym:<3}  {sig_fmt}  RSI:{rsi:>4.1f}  "
-          f"Bull:{_GREEN}{bull}{_RESET}  Bear:{_RED}{bear}{_RESET}  "
-          f"{reasons_s}{suffix}")
+    # Line 2: RSI  Funding  L/S
+    funding_str = f"{funding:+.3f}%" if funding is not None else "N/A"
+    ls_str      = (f"{ls_long:.0f}/{ls_short:.0f}"
+                   if ls_long is not None else "N/A")
+    print(f"  RSI:{rsi:>4.1f}  Funding:{funding_str}  L/S:{ls_str}")
+
+    # Line 3: Bull score bar + reasons
+    bull_reasons_s = ("  " + "  ".join(bull_r)) if bull_r else ""
+    print(f"  {_GREEN}Bull {bull:>2}pt  [{_score_bar(bull)}]{_RESET}{bull_reasons_s}")
+
+    # Line 4: Bear score bar + reasons
+    bear_reasons_s = ("  " + "  ".join(bear_r)) if bear_r else ""
+    print(f"  {_RED}Bear {bear:>2}pt  [{_score_bar(bear)}]{_RESET}{bear_reasons_s}")
+
+    # Open trade P&L
+    if current_price is not None:
+        for line in _open_trade_pnl_lines(st["symbol"], current_price):
+            print(line)
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +557,16 @@ def main():
     print(f"  Telegram  : {'configured' if TELEGRAM_BOT_TOKEN else 'NOT SET'}")
     print(f"  Mode      : {'📋 PAPER TRADING (no live execution)' if PAPER_TRADE else '🔴 LIVE TRADING'}")
     print(f"{'='*70}{_RESET}\n")
+
+    # Restore cooldown state so restarts don't re-trigger recent alerts
+    _load_cooldown_state()
+    if _last_alert:
+        surviving = {s: int(ALERT_COOLDOWN - (time.time() - t))
+                     for s, t in _last_alert.items()
+                     if time.time() - t < ALERT_COOLDOWN}
+        if surviving:
+            parts = "  ·  ".join(f"{s} {r}s left" for s, r in surviving.items())
+            print(f"  {_DIM}Cooldown restored: {parts}{_RESET}\n")
 
     # Startup backtest
     if RUN_STARTUP_BACKTEST:

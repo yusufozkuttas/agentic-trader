@@ -4,6 +4,7 @@
 # Runtime output
 logs/
 paper_trades.json
+cooldown_state.json
 
 # Python
 __pycache__/
