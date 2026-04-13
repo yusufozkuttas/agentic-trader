@@ -39,7 +39,7 @@ orchestrator.py          — main entry point & polling loop
 | Liquidity Sweep | Recent wick above/below a prior swing — stop hunt signal |
 | Trend Filter | EMA100 & EMA300 alignment — counter-trend entries are blocked |
 
-A `STRONG BUY` or `STRONG SELL` fires only when multiple conditions align **in the direction of the trend**.
+Scores are summed and compared: ≥ 5pts → **STRONG BUY / STRONG SELL**, 3–4pts (dominant side) → **BUY / SELL**, otherwise **HOLD**. Trend alignment adds +1pt but does not block signals outright.
 
 ---
 
@@ -115,7 +115,6 @@ cp .env.example .env
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_CHAT_ID=your_chat_id_here
-COINGLASS_API_KEY=your_coinglass_api_key_here   # optional — free endpoints used by default
 SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
 ACCOUNT_BALANCE=1000
 RISK_PCT=1.0

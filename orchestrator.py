@@ -6,8 +6,9 @@ Main entry point for the trading signal bot.
 On startup
 ----------
   1. Loads config from .env
-  2. Runs walk-forward backtest (train + val) and prints health report
+  2. Restores cooldown state from disk (prevents duplicate trades after restart)
   3. Starts the 5-minute polling loop
+  (Startup backtest is disabled by default — set RUN_STARTUP_BACKTEST=True to enable)
 
 Each cycle (every 5 minutes)
 -----------------------------

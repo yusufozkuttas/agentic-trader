@@ -10,26 +10,32 @@
 
 ## Signal Logic (Score-Based)
 
-### Bull Score (max 8pts)
+### Bull Score (max 13pts)
 - RSI < 30 → +3pts (overrides +2)
 - RSI < 35 → +2pts
 - Bullish FVG present → +2pts
 - MACD histogram rising (hist > prev bar) → +1pt
 - Funding rate < -0.01% → +1pt
 - Short side L/S > 55% → +1pt
+- Trend == BULLISH (EMA100 > EMA300, price above both) → +1pt
+- Recent bullish liquidity sweep (last 3 candles) → +2pts
+- Equal lows swept → +1pt
 
-### Bear Score (mirror)
+### Bear Score (mirror, max 13pts)
 - RSI > 70 → +3pts (overrides +2)
 - RSI > 65 → +2pts
 - Bearish FVG present → +2pts
 - MACD histogram falling → +1pt
 - Funding rate > +0.01% → +1pt
 - Long side L/S > 65% → +1pt
+- Trend == BEARISH → +1pt
+- Recent bearish liquidity sweep (last 3 candles) → +2pts
+- Equal highs swept → +1pt
 
 ### Decision Thresholds
-- ≥ 5pts → STRONG BUY / STRONG SELL (triggers risk agent + paper trade)
-- 3–4pts → BUY / SELL (shown in log, no trade)
-- < 3pts → HOLD
+- ≥ 5pts AND dominant side → STRONG BUY / STRONG SELL (triggers risk agent + paper trade)
+- 3–4pts AND dominant side → BUY / SELL (shown in log, no trade)
+- Tie (bull == bear) or < 3pts → HOLD
 
 ## Current State
 - Mode: PAPER TRADING (no live execution)
@@ -39,16 +45,26 @@
 - Poll interval: 300s
 - PAPER_TRADE=true (default, set in .env or orchestrator.py)
 - Bot running via: nohup python -u orchestrator.py >> logs/bot.log 2>&1 &  (>> appends, never overwrites)
-- Paper trades collected: 0
+- Paper trades collected: 8 (3W / 2L / 2CANCELLED / 1OPEN)
 
 ## Terminal Display Format
-One line per symbol, compact:
+Card layout, 4 lines per symbol:
 ```
-Cycle #X  ·  2026-04-13 14:41:55  ·  300s interval
-  BTC  HOLD        RSI:42.5  Bull:1  Bear:2  [MACD↑ FVG↓]
-  ETH  BUY         RSI:40.9  Bull:3  Bear:1  [FVG↑ MACD↑ Longs65%]  +2 to STRONG
-  SOL  SELL        RSI:44.0  Bull:0  Bear:4  [FVG↓ MACD↓ Longs75%]  +1 to STRONG
-  ── next cycle at 14:47:02 ──
+Cycle #X  ·  2026-04-14 02:30:33  ·  300s interval
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  BTC  HOLD  ─ NEUTRAL
+  RSI:80.2  Funding:-0.005%  L/S:45/55
+  Bull  3pt  [▓▓▓░░░░░░░]  FVG↑  MACD↑
+  Bear  3pt  [▓▓▓░░░░░░░]  RSI>70
+
+  SOL  STRONG SELL  ─ NEUTRAL
+  RSI:74.1  Funding:+0.010%  L/S:68/32
+  Bull  3pt  [▓▓▓░░░░░░░]  FVG↑  MACD↑
+  Bear  6pt  [▓▓▓▓▓▓░░░░]  RSI>70  Longs68%  Sweep↓
+  📋 SHORT $86 → now $87  |  -0.38%  |  SL:$88  |  TP1:$83
+
+  ── next cycle at 02:45:56 ──
 ```
 
 ## Next Steps

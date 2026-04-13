@@ -187,9 +187,7 @@ class BacktestEngine:
             w_end   = context[-1]["open_time"].strftime("%m-%d %H:%M")
 
             # Run agents
-            sig  = run_all(context,
-                           weak_buy_rsi=self.weak_buy_rsi,
-                           weak_sell_rsi=self.weak_sell_rsi)
+            sig  = run_all(context)
             plan = from_signal_agent(
                 sig, entry,
                 account_balance=self.account_balance,

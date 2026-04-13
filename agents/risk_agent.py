@@ -305,7 +305,7 @@ def _stop_source(signal_result: dict, stop_level: float, is_long: bool) -> str:
     equal_hl = signal_result.get("equal_hl", {})
     key = "equal_lows" if is_long else "equal_highs"
     for lvl in equal_hl.get(key, []):
-        if abs(lvl["price"] - stop_level) < 1:
+        if abs(lvl["price"] - stop_level) / max(stop_level, 1) < 0.001:
             return f"Equal {'Low' if is_long else 'High'} @ ${stop_level:,.2f}"
     return f"FVG zone @ ${stop_level:,.2f}"
 
