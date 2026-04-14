@@ -199,10 +199,12 @@ def _log_paper_trade(symbol: str, plan: dict):
         "stop_loss":     plan["stop_loss"],
         "tp1":           plan["tp1"],
         "tp2":           plan["tp2"],
-        "risk_usd":      plan["risk_usd"],
-        "outcome":       None,
-        "outcome_price": None,
-        "outcome_time":  None,
+        "risk_usd":          plan["risk_usd"],
+        "contracts":         plan.get("contracts"),
+        "position_size_usd": plan.get("position_size_usd"),
+        "outcome":           None,
+        "outcome_price":     None,
+        "outcome_time":      None,
     })
     _save_paper_trades(trades)
     print(f"  [Paper] Logged {plan['direction']} {symbol}  "
