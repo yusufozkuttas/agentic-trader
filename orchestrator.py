@@ -154,6 +154,30 @@ def _import_agents():
     return fetch_ohlcv, fetch_ticker, fetch_market_snapshot, run_all, from_signal_agent
 
 
+RISK_PCT_ELEVATED  = 2.0   # risk % after threshold is reached
+RISK_TRADE_THRESHOLD = 10  # number of closed trades to trigger elevation
+
+_risk_elevated = [False]   # mutable flag — set once, stays
+
+
+def _get_risk_pct() -> float:
+    """
+    Return current risk %.
+    Switches from RISK_PCT (1%) to RISK_PCT_ELEVATED (2%) after
+    RISK_TRADE_THRESHOLD closed trades.
+    """
+    trades = _load_paper_trades()
+    closed = sum(1 for t in trades if t.get("outcome") in ("WIN", "LOSS"))
+    if closed >= RISK_TRADE_THRESHOLD:
+        if not _risk_elevated[0]:
+            _risk_elevated[0] = True
+            print(f"\n  {_GREEN}{'─'*50}")
+            print(f"  ✓ {RISK_TRADE_THRESHOLD} closed trades reached — risk elevated to {RISK_PCT_ELEVATED}%")
+            print(f"  {'─'*50}{_RESET}\n")
+        return RISK_PCT_ELEVATED
+    return RISK_PCT
+
+
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
@@ -424,7 +448,7 @@ def _process_symbol(
             plan = from_signal_agent(
                 sig, entry,
                 account_balance=_balance[0],
-                risk_pct=RISK_PCT,
+                risk_pct=_get_risk_pct(),
             )
             status["verdict"] = plan["verdict"]
 
@@ -468,7 +492,7 @@ def _score_bar(score: int) -> str:
 
 def _print_cycle_header(cycle: int):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n{_CYAN}Cycle #{cycle}  ·  {now}  ·  {POLL_INTERVAL}s interval  ·  balance=${_balance[0]:,.2f}{_RESET}")
+    print(f"\n{_CYAN}Cycle #{cycle}  ·  {now}  ·  {POLL_INTERVAL}s interval  ·  balance=${_balance[0]:,.2f}  ·  risk={_get_risk_pct()}%{_RESET}")
     print(f"{_DIM}{'━' * 60}{_RESET}")
 
 def _open_trade_pnl_lines(symbol: str, current_price: float) -> list:
